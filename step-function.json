@@ -1,0 +1,92 @@
+{
+  "Comment": "Orchestrate zipping variable number of images",
+  "StartAt": "SplitFiles",
+  "States": {
+    "SplitFiles": {
+      "Type": "Pass",
+      "InputPath": "$",
+      "Parameters": {
+        "fileCount.$": "$.fileCount",
+        "ranges": [
+          {
+            "start": 0,
+            "end": 4999
+          },
+          {
+            "start": 5000,
+            "end": 9999
+          },
+          {
+            "start": 10000,
+            "end": 14999
+          },
+          {
+            "start": 15000,
+            "end": 19999
+          }
+        ],
+        "processDir.$": "$.processDir",
+        "s3Bucket.$": "$.s3Bucket",
+        "updatesQueueUrl.$": "$.updatesQueueUrl",
+        "queueId.$": "$.queueId",
+        "totalSize.$": "$.totalSize",
+        "finalKey.$": "$.finalKey"
+      },
+      "Next": "MapState"
+    },
+    "MapState": {
+      "Type": "Map",
+      "ItemsPath": "$.ranges",
+      "MaxConcurrency": 4,
+      "InputPath": "$",
+      "Parameters": {
+        "fileCount.$": "$.fileCount",
+        "processDir.$": "$.processDir",
+        "s3Bucket.$": "$.s3Bucket",
+        "updatesQueueUrl.$": "$.updatesQueueUrl",
+        "queueId.$": "$.queueId",
+        "totalSize.$": "$.totalSize",
+        "finalKey.$": "$.finalKey",
+        "startIndex.$": "$$.Map.Item.Value.start",
+        "endIndex.$": "$$.Map.Item.Value.end"
+      },
+      "ResultPath": "$.mapResults",
+      "Iterator": {
+        "StartAt": "ZipBatch",
+        "States": {
+          "ZipBatch": {
+            "Type": "Task",
+            "Resource": "arn:aws:lambda:us-east-2:147899039648:function:BiospexZipCreator",
+            "Parameters": {
+              "processDir.$": "$.processDir",
+              "s3Bucket.$": "$.s3Bucket",
+              "updatesQueueUrl.$": "$.updatesQueueUrl",
+              "queueId.$": "$.queueId",
+              "totalSize.$": "$.totalSize",
+              "fileCount.$": "$.fileCount",
+              "startIndex.$": "$.startIndex",
+              "endIndex.$": "$.endIndex"
+            },
+            "ResultPath": "$.zipKey",
+            "End": true
+          }
+        }
+      },
+      "Next": "MergeZips"
+    },
+    "MergeZips": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-2:147899039648:function:BiospexZipMerger",
+      "Parameters": {
+        "bucket.$": "$.s3Bucket",
+        "partKeys.$": "$.mapResults[*].zipKey[*]",
+        "finalKey.$": "$.finalKey",
+        "updatesQueueUrl.$": "$.updatesQueueUrl",
+        "queueId.$": "$.queueId",
+        "totalSize.$": "$.totalSize",
+        "fileCount.$": "$.fileCount"
+      },
+      "End": true
+    }
+  }
+}

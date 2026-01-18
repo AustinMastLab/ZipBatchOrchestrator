@@ -1,0 +1,12 @@
+# OS Files
+.DS_Store
+Thumbs.db
+
+# Webstorm/IntelliJ
+.idea/
+
+# VS Code
+.vscode/
+
+# AWS Lambda artifacts
+.aws-sam/
