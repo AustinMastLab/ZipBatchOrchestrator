@@ -1,25 +1,17 @@
 # ZipBatchOrchestrator (AWS Step Function)
 
 ## Purpose
-An AWS Step Function workflow that orchestrates the creation of multiple ZIP files for large exports (e.g., Zooniverse). It prevents Lambda timeout and memory issues by splitting a massive image collection into smaller, manageable batches.
+An AWS Step Functions state machine that builds the ZIP file for a large export (for example, a Zooniverse export) in parallel parts, so no single Lambda runs into its time or memory limits.
 
 ## Workflow
-1. **Trigger**: Invoked by `App\Services\Actor\Zooniverse\ZooniverseZipTriggerService` when an export exceeds the `zip_threshold` (defined in Laravel config).
-2. **BiospexBatchCreator**:
-    - Downloads the source manifest/archive.
-    - Splits the manifest into smaller chunks (Batch size: 2000).
-    - Uploads batch CSVs and individual image files to a temporary location.
-3. **Map State (Parallel Processing)**:
-    - Iterates over the list of created batches.
-    - For each batch, it invokes the **BiospexZipCreator** Lambda.
-4. **BiospexZipCreator**:
-    - Takes a batch manifest and creates a partial ZIP file (e.g., `filename-part1.zip`).
-    - Uploads the partial ZIP to S3.
-5. **BiospexZipMerger**:
-    - Once all parallel batch tasks are complete, this Lambda merges the partial ZIPs into a single final archive.
-6. **Completion/Callback**:
-    - The final result is uploaded to the destination S3 key.
-    - A success/failure notification is sent back to the Laravel application via SQS (`updatesQueueUrl`).
+1. **Trigger**: Started by `App\Services\Actor\Zooniverse\ZooniverseZipTriggerService` when an export has more files than `services.aws.zip_threshold` (8,000). Smaller exports skip the state machine and go straight to `BiospexZipCreator` through SQS.
+2. **SplitFiles** (Pass state): sets four fixed file ranges: 0–4,999, 5,000–9,999, 10,000–14,999 and 15,000–19,999.
+    - Together they cover at most 20,000 files, the maximum expedition size (`config.expedition_size` in BIOSPEX). Raising that limit needs a change here first.
+    - Every run uses all four ranges. For a range past the last file, `BiospexZipCreator` reports "No files found", which BIOSPEX ignores.
+3. **MapState** (Map state): runs **BiospexZipCreator** once per range, up to four at a time. Each run zips its range of images into a partial ZIP in S3.
+4. **MergeZips**: runs **BiospexZipMerger**, which combines the partial ZIPs into the final archive (`finalKey`), deletes the parts, and reports `zip-ready` to BIOSPEX through SQS (`updatesQueueUrl`).
+
+The state machine calls both Lambdas without an alias, so it always runs their latest uploaded code (`$LATEST`) in every environment. See BIOSPEX issue #514 for the plan to pass an environment alias.
 
 ## Inputs/Outputs
 - **Inputs (JSON)**:
@@ -31,15 +23,18 @@ An AWS Step Function workflow that orchestrates the creation of multiple ZIP fil
     - `updatesQueueUrl`: SQS URL for status reporting.
     - `finalKey`: The destination S3 key for the merged ZIP.
 - **Outputs**:
-    - S3: Final merged ZIP file.
-    - SQS: Success/Failure notification sent to Laravel.
+    - S3: The merged ZIP at `finalKey`.
+    - SQS: `zip-ready` from `BiospexZipMerger`, and a message from each `BiospexZipCreator` part, sent to `updatesQueueUrl`.
 
 ## Related Components
-- **Laravel Service**: `App\Services\Actor\Zooniverse\ZooniverseZipTriggerService` (Triggers this State Machine).
-- **Lambda**: `BiospexBatchCreator` (Splits the manifest).
-- **Lambda**: `BiospexZipCreator` (Creates batch ZIPs).
-- **Lambda**: `BiospexZipMerger` (Finalizes the export).
+- **Laravel Service**: `App\Services\Actor\Zooniverse\ZooniverseZipTriggerService` (starts this state machine).
+- **Laravel Command**: `App\Console\Commands\SqsListenerExportUpdate` (`export:listen`, receives the status messages).
+- **Lambda**: `BiospexZipCreator` (creates each partial ZIP).
+- **Lambda**: `BiospexZipMerger` (merges them into the final ZIP).
+
+`BiospexBatchCreator` is not part of this state machine; it splits finished exports into downloadable batches in a separate flow.
 
 ## Configuration
 - **ARN**: `arn:aws:states:us-east-2:147899039648:stateMachine:ZipBatchOrchestrator`
 - **Region**: `us-east-2`
+- **Definition**: `step-function.json`, updated with `aws stepfunctions update-state-machine` or in the AWS console.
